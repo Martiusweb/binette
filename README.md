@@ -17,11 +17,11 @@ Dependencies
 
 Runtime dependencies:
 
-* SQLite3
+* SQLite 3.14
 
 Build dependencies:
 
-* Rust 1.86
+* Rust 1.86, cargo and clippy
 * headers of runtime libraries listed above
 
 Developpement
