@@ -17,7 +17,7 @@ Dependencies
 
 Runtime dependencies:
 
-* SQLite3
+* SQLite 3.14
 
 Build dependencies:
 
