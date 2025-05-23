@@ -8,7 +8,7 @@ use thiserror::Error;
 /// The App ID is a user-defined i32 value set in a SQLite database headers.
 /// We expect that if the `application_id` value is this one, it's a valid file
 /// created by (or compatible with) our app.
-const SQLITE_APP_ID: i32 = 0x27011990;
+const SQLITE_APP_ID: i32 = 0x2701_1990;
 
 /// The user version is stored is an opaque 32 bits field in a SQLite database
 /// headers. Used to track the schema version.
@@ -18,6 +18,10 @@ const SQLITE_APP_ID: i32 = 0x27011990;
 const SQLITE_USER_VERSION: u32 = 1;
 
 /// Returns the current database schema.
+///
+/// A few remarks:
+/// * following SQLite recommentations (<https://www.sqlite.org/autoinc.html>),
+///   we don't use autoincrement. `id` may reuse previously assigned values.
 fn schema() -> String {
     format!(
         "PRAGMA application_id = {};
@@ -29,6 +33,20 @@ fn schema() -> String {
         );
 
         INSERT INTO app_metadata (version, upgraded_from) VALUES ('{}', NULL);
+
+        CREATE TABLE root (
+            id INTEGER PRIMARY KEY,
+            path TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE file (
+            id INTEGER PRIMARY KEY,
+            root_id INTEGER NOT NULL REFERENCES root(id) ON DELETE CASCADE,
+            path TEXT NOT NULL,
+            missing BOOLEAN DEFAULT FALSE,
+            track_id INTEGER
+        );
+        CREATE UNIQUE INDEX file_path_idx ON file(root_id, path);
 
         PRAGMA user_version = {};",
         SQLITE_APP_ID,
@@ -55,6 +73,12 @@ pub enum DbError {
 
     #[error("failed to read the file, its format is invalid")]
     InvalidFileError,
+
+    #[error("an operation failed: {details} (cause: {cause:?})")]
+    RuntimeError {
+        details: String,
+        cause: Option<rusqlite::Error>,
+    },
 }
 
 /// Specialized result type for the db module.
@@ -66,6 +90,7 @@ trait IntoResult<T> {
     fn into_read_failed(self) -> Result<T>;
     fn into_write_failed(self) -> Result<T>;
     fn into_invalid_or_read_failed(self) -> Result<T>;
+    fn into_runtime_error<S: Into<String>>(self, details: S) -> Result<T>;
 }
 
 impl<T> IntoResult<T> for rusqlite::Result<T> {
@@ -101,6 +126,16 @@ impl<T> IntoResult<T> for rusqlite::Result<T> {
             _ => self.into_read_failed(),
         }
     }
+
+    fn into_runtime_error<S: Into<String>>(self, details: S) -> Result<T> {
+        match self {
+            Err(e) => Err(DbError::RuntimeError {
+                details: details.into(),
+                cause: Some(e),
+            }),
+            Ok(r) => Ok(r),
+        }
+    }
 }
 
 /// Represents an on-disk file containing the library database.
@@ -128,9 +163,13 @@ impl AppFile {
     /// If the file is new or empty, it will be initialized with the current
     /// format version.
     ///
+    /// # Errors
     /// Returns an error if the file can't be read, initialized (write error)
     /// or is invalid (not a SQLite database or not with a matching app id).
     pub fn try_open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        static FK_SUPPORT_ERR: &str = "Failed to enable foreign keys with SQLite. \
+                                 SQLite version is too old or compiled without support for foreign keys";
+
         let mut connection = Connection::open(path.as_ref()).into_open_failed(path.as_ref())?;
 
         let application_id: i32 = connection
@@ -159,11 +198,26 @@ impl AppFile {
             transaction.commit().into_write_failed()?;
         }
 
-        Ok(Self { connection })
+        connection
+            .execute("PRAGMA foreign_keys = 1;", [])
+            .into_runtime_error(FK_SUPPORT_ERR)?;
+
+        match connection.query_row("SELECT foreign_keys FROM pragma_foreign_keys()", [], |r| {
+            r.get::<_, i32>(0)
+        }) {
+            Err(_) | Ok(0) => Err(DbError::RuntimeError {
+                details: FK_SUPPORT_ERR.into(),
+                cause: None,
+            }),
+            Ok(_) => Ok(Self { connection }),
+        }
     }
 
     /// Returns whether the version of the file matches the current version
     /// (Equal), is older (Less) or newer (Greater).
+    ///
+    /// # Errors
+    /// Returns a read error if the database can't be read.
     pub fn compare_version(&self) -> Result<Ordering> {
         let user_version: u32 = self
             .connection
@@ -178,7 +232,11 @@ impl AppFile {
     /// Upgrades the file format to the current version (in place).
     ///
     /// Perform a manual copy of the file before the upgrade to avoid data loss.
-    #[allow(clippy::unnecessary_wraps, unused_self, unused_mut)] // for forward compat.
+    ///
+    /// # Errors
+    ///
+    /// Currently never fails as no upgrade happens.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self, unused_mut)] // for forward compat.
     pub fn upgrade(&mut self) -> Result<()> {
         // Currently a no-op since there is only one version.
         Ok(())
