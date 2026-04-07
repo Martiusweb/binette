@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = "0.35.0"
+rusqlite = "0.39.0"
 thiserror = "2.0.12"
 
 [dev-dependencies]
