@@ -257,7 +257,7 @@ mod tests {
     fn test_open_fail_on_invalid_path() {
         assert_that!(
             AppFile::try_open("/tmp/doesnt_exist/test.db"),
-            err(matches_pattern!(DbError::OpenFailed {
+            err(pat!(DbError::OpenFailed {
                 path: eq(&PathBuf::from("/tmp/doesnt_exist/test.db")),
                 cause: anything()
             }))
