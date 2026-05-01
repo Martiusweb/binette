@@ -17,3 +17,5 @@ collections (around 5000-1000 tracks).
   and well-maintained solutions before adding them to the project.
 * The codebase is thoroughly tested. We use googletest (the rust implementation)
   in unit tests.
+* Do not use the crate anywhow, but define an error type in the module, which
+  wraps internal errors.

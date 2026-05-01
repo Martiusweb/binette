@@ -39,3 +39,6 @@
   Would you like to dive deeper into how to integrate symphonia with chromaprint-next, or are you
   more interested in the database storage and search aspect (LSH)?
 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+**Metadata Note:**
+While `symphonia` is great for audio decoding and has metadata support, if we only need comprehensive and robust metadata parsing (tags) without decoding, `lofty` is a very strong and specialized alternative to keep in mind. I've left metadata reading for later to see if `symphonia` fully satisfies the requirements, but `lofty` remains a solid option.
