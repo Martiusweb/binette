@@ -57,11 +57,13 @@ impl MusicLibrary {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{AppFile, MusicLibrary};
     use assert_fs::prelude::*;
+    use googletest::prelude::*;
 
     #[test]
-    fn test_update_root() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn test_update_root() -> Result<()> {
+
         let tmp_dir = assert_fs::TempDir::new()?;
         tmp_dir.child("track1.mp3").touch()?;
         tmp_dir.child("folder/track2.flac").touch()?;
@@ -73,8 +75,14 @@ mod tests {
 
         library.update_root(tmp_dir.path()).expect("failed to update root");
 
-        // TODO: Could add a query method to AppFile to verify inserted records.
+        let mut found_files = Vec::new();
+        library.db.for_each_file(|f| {
+            found_files.push(f.expect("failed to read file from db"));
+        }).expect("failed to iterate over files");
 
-        Ok(())
+        verify_eq!(found_files.len(), 2)?;
+
+        let paths: Vec<_> = found_files.iter().map(|f| f.path.to_string_lossy().to_string()).collect();
+        verify_that!(paths, contains_each![eq("track1.mp3"), eq("folder/track2.flac")])
     }
 }

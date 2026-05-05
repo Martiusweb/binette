@@ -18,4 +18,7 @@ collections (around 5000-1000 tracks).
 * The codebase is thoroughly tested. We use googletest (the rust implementation)
   in unit tests.
 * Do not use the crate anywhow, but define an error type in the module, which
-  wraps internal errors.
+  wraps errors from dependencies.
+* If a test doesn't yield errors, use assert_* macros. If the test may return an
+  error (the test returns a result), use verify_* macros. The last macro call is
+  the return value - it doesn't return Ok(()).

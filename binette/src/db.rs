@@ -74,6 +74,7 @@ impl std::fmt::Display for Platform {
 /// * To support cross platform sharing of the database, we store paths as BLOB
 ///   and a lossy UTF-8 representation (e.g. what `Path::to_string_lossy` returns)
 ///   as `path_lossy`. The latter is used for indexing and searching.
+/// * `path_lossy` is an implementation detail and is not exposed by the API.
 fn schema() -> String {
     format!(
         "PRAGMA application_id = {};
@@ -138,6 +139,9 @@ pub enum DbError {
 
     #[error("incompatible database platform: {platform}")]
     InvalidPlatformError { platform: Platform },
+
+    #[error("the requested record was not found")]
+    NotFound,
 }
 
 /// Specialized result type for the db module.
@@ -228,6 +232,24 @@ fn bytes_to_path(b: &[u8]) -> PathBuf {
         b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
     ))
 }
+
+/// A root directory of the music library.
+#[derive(Debug, PartialEq, Clone)]
+pub struct Root {
+    pub id: i64,
+    pub path: PathBuf,
+}
+
+/// A file in the music library, joined with its root.
+#[derive(Debug, PartialEq, Clone)]
+pub struct File {
+    pub id: i64,
+    pub root_path: PathBuf,
+    pub path: PathBuf,
+    pub missing: bool,
+    pub track_id: Option<i64>,
+}
+
 
 /// Represents an on-disk file containing the library database.
 ///
@@ -401,6 +423,135 @@ impl AppFile {
             )
             .into_read_failed()
     }
+
+    /// Retrieves a root by its ID.
+    ///
+    /// # Errors
+    /// Returns a read error if the query fails. Returns `NotFound` if the root does not exist.
+    pub fn get_root(&self, id: i64) -> Result<Root> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id, path FROM root WHERE id = ?1")
+            .into_read_failed()?;
+        let mut rows = stmt.query(rusqlite::params![id]).into_read_failed()?;
+        
+        if let Some(row) = rows.next().into_read_failed()? {
+            let id: i64 = row.get(0).into_read_failed()?;
+            let path_bytes: Vec<u8> = row.get(1).into_read_failed()?;
+            Ok(Root {
+                id,
+                path: bytes_to_path(&path_bytes),
+            })
+        } else {
+            Err(DbError::NotFound)
+        }
+    }
+
+    /// Retrieves a file by its ID, joined with its root.
+    ///
+    /// # Errors
+    /// Returns a read error if the query fails. Returns `NotFound` if the file does not exist.
+    pub fn get_file(&self, id: i64) -> Result<File> {
+        let mut stmt = self
+            .connection
+            .prepare(
+                "SELECT f.id, f.path, f.missing, f.track_id, r.path \
+                 FROM file f \
+                 JOIN root r ON f.root_id = r.id \
+                 WHERE f.id = ?1",
+            )
+            .into_read_failed()?;
+        let mut rows = stmt.query(rusqlite::params![id]).into_read_failed()?;
+        
+        if let Some(row) = rows.next().into_read_failed()? {
+            let f_id: i64 = row.get(0).into_read_failed()?;
+            let f_path_bytes: Vec<u8> = row.get(1).into_read_failed()?;
+            let f_missing: bool = row.get(2).into_read_failed()?;
+            let f_track_id: Option<i64> = row.get(3).into_read_failed()?;
+
+            let r_path_bytes: Vec<u8> = row.get(4).into_read_failed()?;
+
+            Ok(File {
+                id: f_id,
+                root_path: bytes_to_path(&r_path_bytes),
+                path: bytes_to_path(&f_path_bytes),
+                missing: f_missing,
+                track_id: f_track_id,
+            })
+        } else {
+            Err(DbError::NotFound)
+        }
+    }
+
+    /// Iterates over all roots, yielding them to the provided closure.
+    ///
+    /// # Errors
+    /// Returns a read error if the query fails.
+    pub fn for_each_root<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(Result<Root>),
+    {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id, path FROM root")
+            .into_read_failed()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let path_bytes: Vec<u8> = row.get(1)?;
+                Ok(Root {
+                    id,
+                    path: bytes_to_path(&path_bytes),
+                })
+            })
+            .into_read_failed()?;
+
+        for row in rows {
+            callback(row.into_read_failed());
+        }
+        Ok(())
+    }
+
+    /// Iterates over all files (joined with roots), yielding them to the closure.
+    ///
+    /// # Errors
+    /// Returns a read error if the query fails.
+    pub fn for_each_file<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(Result<File>),
+    {
+        let mut stmt = self
+            .connection
+            .prepare(
+                "SELECT f.id, f.path, f.missing, f.track_id, r.path \
+                 FROM file f \
+                 JOIN root r ON f.root_id = r.id",
+            )
+            .into_read_failed()?;
+        let rows = stmt
+            .query_map([], |row| {
+                let f_id: i64 = row.get(0)?;
+                let f_path_bytes: Vec<u8> = row.get(1)?;
+                let f_missing: bool = row.get(2)?;
+                let f_track_id: Option<i64> = row.get(3)?;
+
+                let r_path_bytes: Vec<u8> = row.get(4)?;
+
+                Ok(File {
+                    id: f_id,
+                    root_path: bytes_to_path(&r_path_bytes),
+                    path: bytes_to_path(&f_path_bytes),
+                    missing: f_missing,
+                    track_id: f_track_id,
+                })
+            })
+            .into_read_failed()?;
+
+        for row in rows {
+            callback(row.into_read_failed());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -541,9 +692,7 @@ mod tests {
         let tmpfile = tempfile::NamedTempFile::new()?;
         // initialize the file.
         let mut appfile = AppFile::try_open(tmpfile.path())?;
-        appfile.upgrade()?;
-
-        Ok(())
+        verify_eq!(appfile.upgrade().is_ok(), true)
     }
 
     #[test]
@@ -572,5 +721,81 @@ mod tests {
         // Inserting the same file should return the same ID
         let same_file_id = appfile.insert_file(root_id, "track.mp3")?;
         verify_eq!(file_id, same_file_id)
+    }
+
+    #[test]
+    fn test_get_root() -> Result<()> {
+        let tmpfile = tempfile::NamedTempFile::new()?;
+        let appfile = AppFile::try_open(tmpfile.path())?;
+
+        let root_id = appfile.insert_root("/my/music")?;
+
+        let root = appfile.get_root(root_id)?;
+        verify_eq!(root.id, root_id)?;
+        verify_eq!(root.path, PathBuf::from("/my/music"))?;
+
+        let missing_root_res = appfile.get_root(999);
+        verify_that!(missing_root_res, err(pat!(DbError::NotFound)))
+    }
+
+    #[test]
+    fn test_get_file() -> Result<()> {
+        let tmpfile = tempfile::NamedTempFile::new()?;
+        let appfile = AppFile::try_open(tmpfile.path())?;
+
+        let root_id = appfile.insert_root("/my/music")?;
+        let file_id = appfile.insert_file(root_id, "track1.mp3")?;
+
+        let file = appfile.get_file(file_id)?;
+        verify_eq!(file.id, file_id)?;
+        verify_eq!(file.path, PathBuf::from("track1.mp3"))?;
+        verify_eq!(file.root_path, PathBuf::from("/my/music"))?;
+        verify_eq!(file.missing, false)?;
+        verify_eq!(file.track_id, None)?;
+
+        let missing_file_res = appfile.get_file(999);
+        verify_that!(missing_file_res, err(pat!(DbError::NotFound)))
+    }
+
+    #[test]
+    fn test_for_each_root() -> Result<()> {
+        let tmpfile = tempfile::NamedTempFile::new()?;
+        let appfile = AppFile::try_open(tmpfile.path())?;
+
+        let root_id_1 = appfile.insert_root("/my/music")?;
+        let root_id_2 = appfile.insert_root("/my/other_music")?;
+
+        let mut roots = Vec::new();
+        appfile.for_each_root(|r| {
+            roots.push(r.unwrap());
+        })?;
+        verify_eq!(roots.len(), 2)?;
+        verify_that!(
+            roots.iter().map(|r| r.id).collect::<Vec<_>>(),
+            contains_each![&root_id_1, &root_id_2]
+        )
+    }
+
+    #[test]
+    fn test_for_each_file() -> Result<()> {
+        let tmpfile = tempfile::NamedTempFile::new()?;
+        let appfile = AppFile::try_open(tmpfile.path())?;
+
+        let root_id_1 = appfile.insert_root("/my/music")?;
+        let root_id_2 = appfile.insert_root("/my/other_music")?;
+
+        let file_id_1 = appfile.insert_file(root_id_1, "track1.mp3")?;
+        let file_id_2 = appfile.insert_file(root_id_1, "track2.mp3")?;
+        let file_id_3 = appfile.insert_file(root_id_2, "track3.mp3")?;
+
+        let mut files = Vec::new();
+        appfile.for_each_file(|f| {
+            files.push(f.unwrap());
+        })?;
+        verify_eq!(files.len(), 3)?;
+        verify_that!(
+            files.iter().map(|f| f.id).collect::<Vec<_>>(),
+            contains_each![&file_id_1, &file_id_2, &file_id_3]
+        )
     }
 }
